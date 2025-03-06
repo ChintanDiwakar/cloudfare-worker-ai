@@ -5,7 +5,7 @@ import pandas as pd
 import base64
 import io
 from datetime import datetime
-from pydub import AudioSegment
+from PIL import Image
 
 # Set page title and configuration
 st.set_page_config(
@@ -33,6 +33,11 @@ MODELS = {
         "id": "@cf/openai/whisper-large-v3-turbo",
         "type": "speech",
         "description": "Automatic speech recognition and translation model."
+    },
+    "Stable Diffusion XL Lightning - Image Generation": {
+        "id": "@cf/bytedance/stable-diffusion-xl-lightning",
+        "type": "image",
+        "description": "Fast text-to-image generation model creating high-quality 1024px images."
     }
 }
 
@@ -59,7 +64,8 @@ LANGUAGES = {
 DEFAULT_SYSTEM_MESSAGES = {
     "chat": "You are a friendly assistant that helps write stories",
     "translation": "You are a helpful translator.",
-    "speech": "You are a helpful speech recognition assistant."
+    "speech": "You are a helpful speech recognition assistant.",
+    "image": "You are a creative image generation assistant."
 }
 
 # Function to call Cloudflare AI API
@@ -72,6 +78,7 @@ def call_cloudflare_ai(model_id, input_data):
     
     try:
         response = requests.post(url, headers=headers, json=input_data)
+       
         response.raise_for_status()  # Raise exception for HTTP errors
         return response.json()
     except requests.exceptions.RequestException as e:
@@ -111,9 +118,56 @@ def extract_response(result, model_type):
                 detail_str = ", ".join([f"{k}: {v}" for k, v in details.items()])
                 return f"{text}\n\n*Details: {detail_str}*"
             return text
+    elif model_type == "image":
+        if "result" in result:
+            # For image generation models that return base64-encoded images
+            return result["result"]
     
     # Fallback for unexpected response structure
     return f"⚠️ **Unexpected response format:** ```json\n{json.dumps(result, indent=2)}\n```"
+
+# Helper function to convert audio file to base64
+def audio_to_base64(audio_file):
+    try:
+        # Read uploaded file
+        audio_bytes = audio_file.getvalue()
+        
+        # Convert to base64
+        base64_audio = base64.b64encode(audio_bytes).decode('utf-8')
+        return base64_audio
+    except Exception as e:
+        st.error(f"Error processing audio file: {str(e)}")
+        return None
+
+
+# Helper function to convert image file to base64
+def image_to_base64(image_file):
+    try:
+        # Read uploaded file
+        image_bytes = image_file.getvalue()
+        
+        # Convert to base64
+        base64_image = base64.b64encode(image_bytes).decode('utf-8')
+        return base64_image
+    except Exception as e:
+        st.error(f"Error processing image file: {str(e)}")
+        return None
+
+
+# Helper function to convert base64 to image
+def base64_to_image(base64_string):
+    try:
+        # Remove data URL prefix if present
+        if "base64," in base64_string:
+            base64_string = base64_string.split("base64,")[1]
+        
+        # Decode base64
+        image_bytes = base64.b64decode(base64_string)
+        image = Image.open(io.BytesIO(image_bytes))
+        return image
+    except Exception as e:
+        st.error(f"Error processing image: {str(e)}")
+        return None
 
 # Function to export chat history to CSV
 def export_chat_to_csv(chat_history):
@@ -144,19 +198,6 @@ if "system_messages" not in st.session_state:
 # Title and description
 st.title("🤖 Multi-Model AI Chat")
 st.markdown("Chat with different AI models deployed on Cloudflare")
-
-# Helper function to convert audio file to base64
-def audio_to_base64(audio_file):
-    try:
-        # Read uploaded file
-        audio_bytes = audio_file.getvalue()
-        
-        # Convert to base64
-        base64_audio = base64.b64encode(audio_bytes).decode('utf-8')
-        return base64_audio
-    except Exception as e:
-        st.error(f"Error processing audio file: {str(e)}")
-        return None
 
 # Sidebar for model selection and configuration
 with st.sidebar:
@@ -216,6 +257,49 @@ with st.sidebar:
             placeholder="Provide context to help the model understand the audio content",
             height=80
         )
+    elif model_type == "image":
+        st.subheader("Image Generation Settings")
+        
+        # Mode selection
+        img_mode = st.radio(
+            "Mode:",
+            ["Text-to-Image", "Image-to-Image"],
+            index=0
+        )
+        
+        # Image dimensions
+        col1, col2 = st.columns(2)
+        with col1:
+            img_width = st.select_slider(
+                "Width:",
+                options=[512, 768, 1024, 1536, 2048],
+                value=1024
+            )
+        with col2:
+            img_height = st.select_slider(
+                "Height:",
+                options=[512, 768, 1024, 1536, 2048],
+                value=1024
+            )
+        
+        # Diffusion parameters
+        col1, col2 = st.columns(2)
+        with col1:
+            num_steps = st.slider("Steps:", min_value=1, max_value=20, value=4, help="More steps = higher quality but slower")
+        with col2:
+            guidance = st.slider("Guidance Scale:", min_value=1.0, max_value=20.0, value=7.5, step=0.5, 
+                              help="Higher values make image more closely match prompt")
+        
+        # Optional settings
+        use_seed = st.checkbox("Use fixed seed (for reproducibility)", value=False)
+        if use_seed:
+            seed_value = st.number_input("Seed:", min_value=0, max_value=2147483647, value=42)
+        
+        if img_mode == "Image-to-Image":
+            st.subheader("Source Image")
+            source_img = st.file_uploader("Upload source image:", type=["png", "jpg", "jpeg"])
+            strength = st.slider("Transformation strength:", min_value=0.0, max_value=1.0, value=0.75, step=0.05,
+                              help="Higher values = more transformation, lower values = closer to original image")
     
     # Chat history management
     st.header("Chat Management")
@@ -263,6 +347,19 @@ if model_type == "speech":
             base64_audio = audio_to_base64(uploaded_audio)
             if base64_audio:
                 user_input = f"Processed audio file: {uploaded_audio.name}"
+elif model_type == "image":
+    # Image generation input
+    st.subheader("Image Prompt")
+    prompt = st.text_area("Describe the image you want to generate:", 
+                          placeholder="A majestic mountain landscape with a sunset, flowing river, and forest")
+    negative_prompt = st.text_area("Negative prompt (things to avoid):", 
+                                  placeholder="blurry, distorted, low quality, ugly", height=80)
+    
+    generate_button = st.button("Generate Image")
+    user_input = None  # Will be set later if image is generated
+    
+    if prompt and generate_button:
+        user_input = f"**Image prompt:** {prompt}" + (f"\n\n**Negative prompt:** {negative_prompt}" if negative_prompt else "")
 else:
     # Text input for other models
     user_input = st.chat_input("Type your message here...")
@@ -337,12 +434,67 @@ if user_input:
                 else:
                     assistant_response = "❌ **Error processing audio file**"
             
+            elif model_type == "image":
+                # Handle image generation model
+                input_data = {
+                    "prompt": prompt,
+                    "width": img_width,
+                    "height": img_height,
+                    "num_steps": num_steps,
+                    "guidance": guidance
+                }
+                
+                # Add optional parameters
+                if negative_prompt:
+                    input_data["negative_prompt"] = negative_prompt
+                
+                if use_seed:
+                    input_data["seed"] = seed_value
+                
+                if img_mode == "Image-to-Image" and source_img:
+                    # Convert image to base64
+                    base64_img = image_to_base64(source_img)
+                    if base64_img:
+                        input_data["image_b64"] = base64_img
+                        input_data["strength"] = strength
+                
+                st.write(input_data)
+                result = call_cloudflare_ai(model_id, input_data)
+                st.write(result)
+                img_result = extract_response(result, "image")
+                st.write(img_result)
+                
+                if isinstance(img_result, dict) and "image" in img_result:
+                    # Convert base64 image to displayable image
+                    image = base64_to_image(img_result["image"])
+                    
+                    # Create markdown with settings used
+                    settings_info = f"""
+**Image Generated with:**
+- Prompt: {prompt}
+- Size: {img_width}x{img_height} pixels
+- Steps: {num_steps}
+- Guidance: {guidance}
+                    """
+                    
+                    # Create response that references the image but doesn't include the base64 data
+                    assistant_response = f"{settings_info}\n\n[Image will be displayed below]"
+                    
+                    # Update placeholder with response first
+                    message_placeholder.markdown(assistant_response)
+                    
+                    # Display the image after the text
+                    st.image(image, caption=prompt, use_column_width=True)
+                else:
+                    assistant_response = "❌ **Error generating image**"
+            
             else:
                 # Fallback for unknown model types
                 assistant_response = "⚠️ **Unsupported model type**"
             
-            # Update placeholder with response
-            message_placeholder.markdown(assistant_response)
+            # Update placeholder with response (except for image which is already updated)
+            if model_type != "image" or not (isinstance(img_result, dict) and "image" in img_result):
+                message_placeholder.markdown(assistant_response)
             
             # Add assistant response to chat history
             current_chat_history.append({"role": "assistant", "content": assistant_response})
